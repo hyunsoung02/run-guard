@@ -1,0 +1,36 @@
+{
+  "expo": {
+    "name": "RUN Guard",
+    "slug": "run-guard",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "android": {
+      "package": "com.hyunseong.runguard",
+      "permissions": [
+        "android.permission.ACCESS_COARSE_LOCATION",
+        "android.permission.ACCESS_FINE_LOCATION"
+      ]
+    },
+    "plugins": [
+      "@maplibre/maplibre-react-native",
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "RUN Guard가 러닝 경로와 거리를 측정하도록 위치 사용을 허용해 주세요.",
+          "isAndroidBackgroundLocationEnabled": false,
+          "isAndroidForegroundServiceEnabled": false
+        }
+      ],
+      "expo-font"
+    ],
+    "ios": {
+      "bundleIdentifier": "com.hyunseong.runguard"
+    },
+    "extra": {
+      "eas": {
+        "projectId": "10495e2b-3e2a-4238-877f-3b1ce59fa572"
+      }
+    }
+  }
+}
