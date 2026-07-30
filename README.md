@@ -1,4 +1,3 @@
-[README(6).md](https://github.com/user-attachments/files/30542693/README.6.md)
 # RUN Guard
 
 > GPS와 공공 안전 데이터를 결합해 사용자가 원하는 거리의 왕복 코스를 추천하는 안전 중심 맞춤형 러닝 내비게이션 앱
