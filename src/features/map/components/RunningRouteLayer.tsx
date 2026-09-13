@@ -32,10 +32,6 @@ type TurnaroundMarkerProps = Pick<
   markerId: string;
 };
 
-const START_CHARACTER_IMAGE = require(
-  '../../../assets/map/route-start-character.png',
-);
-
 const WARNING_IMAGE = require(
   '../../../assets/map/route-warning.png',
 );
@@ -51,20 +47,7 @@ const TURNAROUND_MARKER_IMAGE = require(
 const DEFAULT_ID_PREFIX =
   'running-route';
 
-const START_MARKER_OFFSET_X = 0;
-const START_MARKER_OFFSET_Y = 0;
 const CORNER_CURVE_RATIO = 0.15;
-
-const START_OUTLINE_OFFSETS = [
-  { x: -2, y: 0 },
-  { x: 2, y: 0 },
-  { x: 0, y: -2 },
-  { x: 0, y: 2 },
-  { x: -1.5, y: -1.5 },
-  { x: 1.5, y: -1.5 },
-  { x: -1.5, y: 1.5 },
-  { x: 1.5, y: 1.5 },
-] as const;
 
 function isValidCoordinate(
   coordinate: unknown,
@@ -214,7 +197,7 @@ export function RunningRouteLayer({
   route,
   idPrefix = DEFAULT_ID_PREFIX,
   preserveCoordinates = false,
-  showStartMarker = true,
+  showStartMarker = false,
   lineColor = '#4E6A01',
   lineOutlineColor = '#e5f5ba',
 }: RunningRouteLayerProps) {
@@ -249,15 +232,6 @@ export function RunningRouteLayer({
 
   const startCoordinate =
     route.coordinates[0];
-  const nextCoordinate =
-    route.coordinates[1] ??
-    startCoordinate;
-  const isCharacterFacingLeft =
-    nextCoordinate[0] <
-    startCoordinate[0];
-  const characterScaleX =
-    isCharacterFacingLeft ? -1 : 1;
-
   return (
     <>
       <GeoJSONSource
@@ -295,70 +269,20 @@ export function RunningRouteLayer({
         />
       </GeoJSONSource>
 
-      {/* 출발지 캐릭터 */}
+      {/* 필요한 화면에서만 표시하는 단순 출발 마커 */}
       {showStartMarker && (
         <Marker
           key={startMarkerId}
           id={startMarkerId}
-          anchor="center"
+          anchor="bottom"
           lngLat={startCoordinate}
         >
           <View
             pointerEvents="none"
-            style={[
-              styles.startMarkerContainer,
-              {
-                transform: [
-                  {
-                    translateX:
-                      START_MARKER_OFFSET_X,
-                  },
-                  {
-                    translateY:
-                      START_MARKER_OFFSET_Y,
-                  },
-                ],
-              },
-            ]}
+            style={styles.startMarkerContainer}
           >
-            {START_OUTLINE_OFFSETS.map(
-              ({ x, y }) => (
-                <Image
-                  key={`outline-${x}-${y}`}
-                  fadeDuration={0}
-                  resizeMode="contain"
-                  source={START_CHARACTER_IMAGE}
-                  style={[
-                    styles.startCharacter,
-                    styles.startCharacterOutline,
-                    {
-                      transform: [
-                        { translateX: x },
-                        { translateY: y },
-                        { scaleX: characterScaleX },
-                      ],
-                    },
-                  ]}
-                />
-              ),
-            )}
-
-            <Image
-              fadeDuration={0}
-              resizeMode="contain"
-              source={START_CHARACTER_IMAGE}
-              style={[
-                styles.startCharacter,
-                {
-                  transform: [
-                    {
-                      scaleX:
-                        characterScaleX,
-                    },
-                  ],
-                },
-              ]}
-            />
+            <View style={styles.startMarkerDot} />
+            <View style={styles.startMarkerTip} />
           </View>
         </Marker>
       )}
@@ -407,21 +331,30 @@ export function RunningRouteLayer({
 
 const styles = StyleSheet.create({
   startMarkerContainer: {
-    width: 64,
-    height: 72,
+    width: 34,
+    height: 42,
     alignItems: 'center',
-    justifyContent: 'center',
+    justifyContent: 'flex-start',
   },
-
-  startCharacter: {
-    position: 'absolute',
-    width: 54,
-    height: 63,
+  startMarkerDot: {
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    borderWidth: 4,
+    borderColor: '#FFFFFF',
+    backgroundColor: '#7EAC00',
+    elevation: 3,
   },
-
-  startCharacterOutline: {
-    tintColor: '#50514f',
-    opacity: 1,
+  startMarkerTip: {
+    width: 0,
+    height: 0,
+    marginTop: -3,
+    borderLeftWidth: 7,
+    borderRightWidth: 7,
+    borderTopWidth: 11,
+    borderLeftColor: 'transparent',
+    borderRightColor: 'transparent',
+    borderTopColor: '#7EAC00',
   },
 
   turnaroundContainer: {

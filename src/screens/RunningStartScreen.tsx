@@ -1166,19 +1166,21 @@ export function RunningStartScreen({
     setIsStartingRun(true);
     /* Ignore any focus-time location prefetch that finishes after this tap. */
     locationRequestIdRef.current += 1;
-    const capturedAfterMs = Date.now();
     const attemptId =
       runStartAttemptIdRef.current + 1;
     runStartAttemptIdRef.current = attemptId;
 
-    const freshLocation =
-      await refreshRouteStartLocation();
-
-    const locationIsFresh =
-      freshLocation !== null &&
-      freshLocation.timestampMs >=
-        capturedAfterMs -
-          MIN_ROUTE_START_GPS_FRESHNESS_MS;
+    const nowMs = Date.now();
+    const cachedLocation = currentLocation;
+    const cachedLocationIsFresh =
+      cachedLocation !== null &&
+      isLocationUsable(cachedLocation, nowMs) &&
+      nowMs - cachedLocation.timestampMs <=
+        MIN_ROUTE_START_GPS_FRESHNESS_MS;
+    const startLocation =
+      cachedLocationIsFresh
+        ? cachedLocation
+        : await refreshRouteStartLocation();
 
     if (
       attemptId !== runStartAttemptIdRef.current
@@ -1187,9 +1189,8 @@ export function RunningStartScreen({
     }
 
     if (
-      !freshLocation ||
-      !locationIsFresh ||
-      !isLocationUsable(freshLocation)
+      !startLocation ||
+      !isLocationUsable(startLocation)
     ) {
       startNavigationPending.current = false;
       setIsStartingRun(false);
@@ -1216,8 +1217,8 @@ export function RunningStartScreen({
     }
 
     const currentCoordinate: LngLat = [
-      freshLocation.longitude,
-      freshLocation.latitude,
+      startLocation.longitude,
+      startLocation.latitude,
     ];
     const distanceFromRouteStartM =
       calculateCoordinateDistanceM(
@@ -1307,11 +1308,9 @@ export function RunningStartScreen({
       return;
     }
 
-    preparedStore.startSession(
-      freshLocation.timestampMs,
-    );
+    preparedStore.startSession(Date.now());
     preparedStore.appendLocationPoint(
-      freshLocation,
+      startLocation,
       0,
     );
 
