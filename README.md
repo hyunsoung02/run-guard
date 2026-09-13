@@ -11,7 +11,7 @@ RUN Guard는 러닝 전에는 **목표 거리와 안전도를 함께 고려한 �
 
 | 안전 코스 추천 | 실시간 러닝 안내 | 기록 분석 |
 |---|---|---|
-| ![안전 코스 추천](docs/images/course-recommendation.jpeg) | ![실시간 러닝](docs/images/running-session.jpeg) | ![기록 분석](docs/images/record-detail.jpeg) |
+| ![안전 코스 추천](docs/images/course-recommendation.jpeg) | ![실시간 러닝 안내](docs/images/running-session.png) | ![기록 분석](docs/images/record-detail.jpeg) |
 
 ## 프로젝트 개요
 
