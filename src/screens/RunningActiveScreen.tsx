@@ -1,7 +1,7 @@
 import { Ionicons } from '@expo/vector-icons';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Alert, Pressable, StatusBar, StyleSheet, Text, View } from 'react-native';
+import { Alert, Image, Pressable, StatusBar, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { LiveRunningMap } from '../features/map/components/LiveRunningMap';
@@ -20,6 +20,19 @@ type Props = NativeStackScreenProps<RootStackParamList, 'RunningActive'>;
 const EMPTY_COORDINATES: [] = [];
 const EMPTY_STEPS: [] = [];
 const EMPTY_WARNINGS: [] = [];
+const DIRECTION_ARROW_IMAGE = require('../assets/icons/running/running-direction-arrow.png');
+const TURN_ROTATION = {
+  straight: 0,
+  'slight-left': -45,
+  left: -90,
+  'sharp-left': -135,
+  'slight-right': 45,
+  right: 90,
+  'sharp-right': 135,
+  'u-turn': 180,
+  arrive: 0,
+  unknown: 0,
+} as const;
 
 function canFinish(status: RunningSessionStatus | undefined) {
   return status === 'running' || status === 'paused';
@@ -41,10 +54,12 @@ function formatDistance(distanceM: number): string {
 
 export function RunningActiveScreen({ navigation, route }: Props) {
   const runningData = useRunningSession();
-  const { preferences, isHydrated: settingsAreHydrated } = useSettingsPreferences();
+  const { height } = useWindowDimensions();
+  const { preferences, isHydrated: settingsAreHydrated, updateVoiceGuide } = useSettingsPreferences();
   const stopPendingRef = useRef(false);
   const [followLocation, setFollowLocation] = useState(true);
   const [focusRequestKey, setFocusRequestKey] = useState(1);
+  const [controlsLocked, setControlsLocked] = useState(false);
   const params = route.params;
   const routeCoordinates = params?.routeCoordinates ?? EMPTY_COORDINATES;
   const navigationSteps = params?.navigationSteps ?? EMPTY_STEPS;
@@ -82,6 +97,12 @@ export function RunningActiveScreen({ navigation, route }: Props) {
       : !progress.isLocationAccuracyUsable
         ? 'GPS 정확도를 확인하고 있습니다.'
         : guidanceStep?.instruction ?? '길 안내를 준비하고 있습니다.';
+  const direction = guidanceStep?.maneuver ?? 'straight';
+  const targetDistanceM = Math.max(0, runningData.targetDistanceM);
+  const progressRatio = targetDistanceM > 0
+    ? Math.min(1, Math.max(0, runningData.distanceM / targetDistanceM))
+    : 0;
+  const bottomPanelHeight = Math.min(330, Math.max(270, height * 0.36));
 
   const nextTurnMarker = useMemo<NextTurnMarker | null>(() => {
     if (!guidanceStep || guidanceStep.maneuver === 'arrive') return null;
@@ -181,19 +202,29 @@ export function RunningActiveScreen({ navigation, route }: Props) {
       />
 
       <SafeAreaView pointerEvents="box-none" style={styles.overlay}>
-        <View style={styles.statsCard}>
-          <View style={styles.stat}><Text style={styles.statLabel}>거리</Text><Text style={styles.statValue}>{formatDistance(runningData.distanceM)}</Text></View>
-          <View style={styles.divider} />
-          <View style={styles.stat}><Text style={styles.statLabel}>남은 거리</Text><Text style={styles.statValue}>{formatDistance(runningData.remainingDistanceM)}</Text></View>
-          <View style={styles.divider} />
-          <View style={styles.stat}><Text style={styles.statLabel}>시간</Text><Text style={styles.statValue}>{formatClock(runningData.elapsedSeconds)}</Text></View>
-        </View>
-
         <View style={styles.guidanceCard}>
-          <Ionicons name={progress.isOffRoute ? 'warning-outline' : 'navigate'} size={28} color="#4E6A01" />
+          <View style={styles.turnSummary}>
+            {progress.isOffRoute ? (
+              <Ionicons name="warning-outline" size={45} color="#FFFFFF" />
+            ) : (
+              <Image
+                fadeDuration={0}
+                resizeMode="contain"
+                source={DIRECTION_ARROW_IMAGE}
+                style={[styles.directionArrow, { transform: [{ rotate: `${TURN_ROTATION[direction]}deg` }] }]}
+              />
+            )}
+            <Text style={styles.turnDistance}>
+              {guidanceDistanceM === null ? '--' : `${guidanceDistanceM}M`}
+            </Text>
+          </View>
+          <View style={styles.guidanceDivider} />
           <View style={styles.guidanceCopy}>
             <Text numberOfLines={2} style={styles.instruction}>{instruction}</Text>
-            <Text style={styles.guidanceMeta}>{guidanceDistanceM === null ? '거리 계산 중' : `다음 안내 ${guidanceDistanceM}m`} · 평균 페이스 {runningData.pace}</Text>
+            <Text style={styles.guidanceMeta}>다음 안내 지점까지</Text>
+          </View>
+          <View pointerEvents="none" style={styles.menuGlyph}>
+            <View style={styles.menuLine} /><View style={styles.menuLine} /><View style={styles.menuLine} />
           </View>
         </View>
 
@@ -203,19 +234,69 @@ export function RunningActiveScreen({ navigation, route }: Props) {
           </View>
         )}
 
-        <View style={styles.bottomRow}>
-          <Pressable accessibilityLabel="현재 위치로 이동" onPress={() => { setFollowLocation(true); setFocusRequestKey((key) => key + 1); }} style={styles.locationButton}>
+        <View style={[styles.mapButtons, { bottom: bottomPanelHeight + 18 }]}>
+          <Pressable
+            accessibilityLabel={preferences.voiceGuide.enabled ? '음성 안내 끄기' : '음성 안내 켜기'}
+            disabled={!settingsAreHydrated}
+            onPress={() => updateVoiceGuide({
+              ...preferences.voiceGuide,
+              enabled: !preferences.voiceGuide.enabled,
+            })}
+            style={styles.mapButton}
+          >
+            <Ionicons name={preferences.voiceGuide.enabled ? 'volume-high' : 'volume-mute'} size={24} color="#4E6A01" />
+          </Pressable>
+          <Pressable accessibilityLabel="현재 위치로 이동" onPress={() => { setFollowLocation(true); setFocusRequestKey((key) => key + 1); }} style={styles.mapButton}>
             <Ionicons name="locate" size={25} color="#4E6A01" />
           </Pressable>
-          <View style={styles.controls}>
-            <Pressable accessibilityLabel={runningData.status === 'paused' ? '러닝 다시 시작' : '러닝 일시정지'} onPress={handlePauseToggle} style={styles.pauseButton}>
-              <Ionicons name={runningData.status === 'paused' ? 'play' : 'pause'} size={30} color="#FFFFFF" />
-              <Text style={styles.controlText}>{runningData.status === 'paused' ? '재개' : '일시정지'}</Text>
-            </Pressable>
-            <Pressable accessibilityLabel="러닝 종료" onPress={handleStop} style={styles.stopButton}>
-              <Ionicons name="stop" size={27} color="#FFFFFF" />
-              <Text style={styles.controlText}>종료</Text>
-            </Pressable>
+        </View>
+
+        <View style={[styles.runningPanel, { height: bottomPanelHeight }]}>
+          <View style={styles.panelSummary}>
+            <View style={styles.elapsedBlock}>
+              <Text style={styles.runningStatus}>{runningData.status === 'paused' ? '일시정지' : '러닝 중'}</Text>
+              <Text adjustsFontSizeToFit numberOfLines={1} style={styles.elapsedTime}>{formatClock(runningData.elapsedSeconds)}</Text>
+              <Text style={styles.elapsedLabel}>경과 시간</Text>
+            </View>
+            <View style={styles.progressBlock}>
+              <Text style={styles.progressDistance}>
+                {(Math.max(0, runningData.distanceM) / 1000).toFixed(2)} km
+                <Text style={styles.progressTarget}> / {(targetDistanceM / 1000).toFixed(1)} km</Text>
+              </Text>
+              <View style={styles.progressTrack}>
+                <View style={[styles.progressFill, { width: `${progressRatio * 100}%` }]} />
+              </View>
+              <Text style={styles.progressLabel}>목표 거리</Text>
+            </View>
+          </View>
+
+          <View style={styles.panelDivider} />
+
+          <View style={styles.metricsRow}>
+            <View style={styles.metric}><Ionicons name="heart-outline" size={20} color="#8EA0AA" /><Text style={styles.metricValue}>{runningData.heartRate ?? '--'}</Text><Text style={styles.metricLabel}>심박수</Text></View>
+            <View style={styles.metric}><Ionicons name="speedometer-outline" size={20} color="#8EA0AA" /><Text style={styles.metricValue}>{runningData.pace}</Text><Text style={styles.metricLabel}>평균 페이스</Text></View>
+            <View style={styles.metric}><Ionicons name="map-outline" size={20} color="#8EA0AA" /><Text style={styles.metricValue}>{formatDistance(runningData.distanceM)}</Text><Text style={styles.metricLabel}>거리</Text></View>
+          </View>
+
+          <View style={styles.controlsRow}>
+            <View style={styles.controlItem}>
+              <Pressable accessibilityLabel={controlsLocked ? '컨트롤 잠금 해제' : '컨트롤 잠금'} onPress={() => setControlsLocked((locked) => !locked)} style={styles.sideControl}>
+                <Ionicons name={controlsLocked ? 'lock-closed' : 'lock-open-outline'} size={24} color="#FFFFFF" />
+              </Pressable>
+              <Text style={styles.controlLabel}>{controlsLocked ? '잠금 해제' : '잠금'}</Text>
+            </View>
+            <View style={styles.controlItem}>
+              <Pressable disabled={controlsLocked} accessibilityLabel={runningData.status === 'paused' ? '러닝 다시 시작' : '러닝 일시정지'} onPress={handlePauseToggle} style={[styles.pauseButton, controlsLocked && styles.controlDisabled]}>
+                <Ionicons name={runningData.status === 'paused' ? 'play' : 'pause'} size={34} color="#FFFFFF" />
+              </Pressable>
+              <Text style={styles.controlLabel}>{runningData.status === 'paused' ? '재개' : '일시정지'}</Text>
+            </View>
+            <View style={styles.controlItem}>
+              <Pressable disabled={controlsLocked} accessibilityLabel="러닝 종료" onPress={handleStop} style={[styles.sideControl, controlsLocked && styles.controlDisabled]}>
+                <Ionicons name="stop" size={24} color="#FFFFFF" />
+              </Pressable>
+              <Text style={styles.controlLabel}>종료</Text>
+            </View>
           </View>
         </View>
       </SafeAreaView>
@@ -225,20 +306,42 @@ export function RunningActiveScreen({ navigation, route }: Props) {
 
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: '#F3F3F3' },
-  overlay: { ...StyleSheet.absoluteFill, paddingHorizontal: 14, justifyContent: 'space-between' },
-  statsCard: { marginTop: 8, minHeight: 76, flexDirection: 'row', alignItems: 'center', borderRadius: 20, paddingHorizontal: 10, backgroundColor: 'rgba(255,255,255,0.94)', elevation: 5 },
-  stat: { flex: 1, alignItems: 'center' }, statLabel: { color: '#747474', fontSize: 11, fontWeight: '700' },
-  statValue: { marginTop: 5, color: '#111111', fontSize: 16, fontWeight: '800' },
-  divider: { width: 1, height: 34, backgroundColor: '#E4E4E4' },
-  guidanceCard: { position: 'absolute', top: 104, right: 14, left: 14, minHeight: 76, flexDirection: 'row', alignItems: 'center', gap: 12, padding: 14, borderRadius: 20, backgroundColor: 'rgba(255,255,255,0.95)', elevation: 5 },
-  guidanceCopy: { flex: 1 }, instruction: { color: '#111111', fontSize: 17, fontWeight: '800', lineHeight: 22 },
-  guidanceMeta: { marginTop: 4, color: '#626262', fontSize: 12, fontWeight: '600' },
-  notice: { position: 'absolute', top: 192, right: 22, left: 22, padding: 10, borderRadius: 12, backgroundColor: 'rgba(17,17,17,0.84)' },
+  overlay: { ...StyleSheet.absoluteFill, justifyContent: 'space-between' },
+  guidanceCard: { height: 158, marginTop: 8, marginHorizontal: 20, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 18, borderRadius: 36, backgroundColor: '#7EAC00', elevation: 7, shadowColor: '#172100', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.2, shadowRadius: 8 },
+  turnSummary: { width: 82, alignItems: 'center', justifyContent: 'center' },
+  directionArrow: { width: 54, height: 68, tintColor: '#FFFFFF' },
+  turnDistance: { marginTop: 2, color: '#FFFFFF', fontSize: 23, fontWeight: '900', letterSpacing: -0.8 },
+  guidanceDivider: { width: 1, height: 92, marginHorizontal: 16, backgroundColor: 'rgba(255,255,255,0.42)' },
+  guidanceCopy: { flex: 1, minWidth: 0 },
+  instruction: { color: '#FFFFFF', fontSize: 23, fontWeight: '900', lineHeight: 29, letterSpacing: -0.8 },
+  guidanceMeta: { marginTop: 8, color: 'rgba(255,255,255,0.82)', fontSize: 13, fontWeight: '700' },
+  menuGlyph: { width: 25, marginLeft: 8, gap: 5, alignItems: 'flex-end' },
+  menuLine: { width: 22, height: 3, borderRadius: 2, backgroundColor: '#FFFFFF' },
+  notice: { position: 'absolute', top: 178, right: 22, left: 22, padding: 10, borderRadius: 12, backgroundColor: 'rgba(17,17,17,0.84)' },
   noticeText: { color: '#FFFFFF', fontSize: 13, fontWeight: '700', textAlign: 'center' },
-  bottomRow: { marginTop: 'auto', marginBottom: 8, gap: 10 },
-  locationButton: { width: 48, height: 48, alignSelf: 'flex-end', alignItems: 'center', justifyContent: 'center', borderRadius: 24, backgroundColor: '#FFFFFF', elevation: 5 },
-  controls: { minHeight: 72, flexDirection: 'row', gap: 10, padding: 8, borderRadius: 22, backgroundColor: 'rgba(255,255,255,0.96)', elevation: 6 },
-  pauseButton: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, borderRadius: 16, backgroundColor: '#6F9700' },
-  stopButton: { width: 112, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, borderRadius: 16, backgroundColor: '#252525' },
-  controlText: { color: '#FFFFFF', fontSize: 15, fontWeight: '800' },
+  mapButtons: { position: 'absolute', right: 18, gap: 10 },
+  mapButton: { width: 48, height: 48, alignItems: 'center', justifyContent: 'center', borderRadius: 24, backgroundColor: '#FFFFFF', elevation: 5, shadowColor: '#111111', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.16, shadowRadius: 5 },
+  runningPanel: { position: 'absolute', right: 0, bottom: 0, left: 0, paddingTop: 20, paddingHorizontal: 22, borderTopLeftRadius: 34, borderTopRightRadius: 34, backgroundColor: '#071824', elevation: 12 },
+  panelSummary: { minHeight: 70, flexDirection: 'row', alignItems: 'center' },
+  elapsedBlock: { flex: 1.05 },
+  runningStatus: { color: '#8FC500', fontSize: 13, fontWeight: '800' },
+  elapsedTime: { marginTop: 1, color: '#FFFFFF', fontSize: 34, fontWeight: '800', letterSpacing: -1.5 },
+  elapsedLabel: { color: '#8EA0AA', fontSize: 11, fontWeight: '600' },
+  progressBlock: { flex: 0.95, alignItems: 'flex-end' },
+  progressDistance: { color: '#FFFFFF', fontSize: 15, fontWeight: '800' },
+  progressTarget: { color: '#8EA0AA', fontSize: 12, fontWeight: '600' },
+  progressTrack: { width: '100%', height: 7, marginTop: 12, overflow: 'hidden', borderRadius: 4, backgroundColor: '#263944' },
+  progressFill: { height: '100%', borderRadius: 4, backgroundColor: '#7EAC00' },
+  progressLabel: { marginTop: 6, color: '#8EA0AA', fontSize: 11, fontWeight: '600' },
+  panelDivider: { height: 1, marginTop: 10, backgroundColor: '#20333E' },
+  metricsRow: { height: 70, flexDirection: 'row', alignItems: 'center' },
+  metric: { flex: 1, alignItems: 'center', justifyContent: 'center' },
+  metricValue: { marginTop: 2, color: '#FFFFFF', fontSize: 16, fontWeight: '800' },
+  metricLabel: { marginTop: 2, color: '#8EA0AA', fontSize: 10, fontWeight: '600' },
+  controlsRow: { flex: 1, minHeight: 88, flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-around', paddingTop: 3 },
+  controlItem: { width: 82, alignItems: 'center' },
+  sideControl: { width: 50, height: 50, alignItems: 'center', justifyContent: 'center', borderRadius: 25, backgroundColor: '#263944' },
+  pauseButton: { width: 62, height: 62, marginTop: -6, alignItems: 'center', justifyContent: 'center', borderRadius: 31, backgroundColor: '#7EAC00', elevation: 4 },
+  controlDisabled: { opacity: 0.36 },
+  controlLabel: { marginTop: 7, color: '#D5DEE3', fontSize: 11, fontWeight: '700' },
 });
