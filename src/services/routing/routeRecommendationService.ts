@@ -119,15 +119,24 @@ const SCORE_TIE_EPSILON = 0.01;
 const ROUTE_SIGNATURE_SAMPLE_COUNT = 12;
 export const ROUTE_DISTANCE_TOLERANCE_M =
   200;
+const ROUTE_DISTANCE_TOLERANCE_RATIO =
+  0.03;
 const MAX_GENERATION_ATTEMPTS = 3;
 const INITIAL_RADIUS_SCALE = 0.75;
 
 export function isRouteDistanceWithinTolerance(
   targetDistanceM: number,
   actualDistanceM: number,
-  toleranceM =
-    ROUTE_DISTANCE_TOLERANCE_M,
+  toleranceM?: number,
 ): boolean {
+  const effectiveToleranceM =
+    toleranceM ??
+    Math.max(
+      ROUTE_DISTANCE_TOLERANCE_M,
+      targetDistanceM *
+        ROUTE_DISTANCE_TOLERANCE_RATIO,
+    );
+
   return (
     Number.isFinite(
       targetDistanceM,
@@ -137,12 +146,14 @@ export function isRouteDistanceWithinTolerance(
       actualDistanceM,
     ) &&
     actualDistanceM > 0 &&
-    Number.isFinite(toleranceM) &&
-    toleranceM >= 0 &&
+    Number.isFinite(
+      effectiveToleranceM,
+    ) &&
+    effectiveToleranceM >= 0 &&
     Math.abs(
       actualDistanceM -
         targetDistanceM,
-    ) <= toleranceM
+    ) <= effectiveToleranceM
   );
 }
 
@@ -937,92 +948,70 @@ export async function generateRecommendedRoute({
     RouteCandidateFailure[] = [];
   const seenSignatures =
     new Set<string>();
-  let radiusScale =
-    INITIAL_RADIUS_SCALE;
+  const generatedCandidates:
+    RouteRecommendationCandidate[] =
+    [];
 
+  // Keep each direction's correction independent and serialize requests so
+  // retries cannot create a burst of concurrent ORS calls.
   for (
-    let attemptIndex = 0;
-    attemptIndex <
-    MAX_GENERATION_ATTEMPTS;
-    attemptIndex += 1
+    let variantIndex = 0;
+    variantIndex <
+    ROUTE_CANDIDATE_VARIANTS.length;
+    variantIndex += 1
   ) {
-    const settledCandidates =
-      await Promise.allSettled(
-        ROUTE_CANDIDATE_VARIANTS.map(
-          async (
+    const variant =
+      ROUTE_CANDIDATE_VARIANTS[
+        variantIndex
+      ];
+    const waypoint =
+      waypointCandidates.length > 0
+        ? waypointCandidates[
+            variantIndex %
+              waypointCandidates.length
+          ]
+        : undefined;
+    let radiusScale =
+      INITIAL_RADIUS_SCALE;
+
+    for (
+      let attemptIndex = 0;
+      attemptIndex <
+      MAX_GENERATION_ATTEMPTS;
+      attemptIndex += 1
+    ) {
+      const candidateId =
+        `${variant.id}-attempt-${attemptIndex + 1}`;
+
+      try {
+        const routeResult =
+          await requestCandidateRoute({
+            startCoordinate,
+            targetDistanceM,
+            keyword,
             variant,
             variantIndex,
-          ) => {
-            const waypoint =
-              waypointCandidates.length >
-              0
-                ? waypointCandidates[
-                    variantIndex %
-                      waypointCandidates.length
-                  ]
-                : undefined;
-            const routeResult =
-              await requestCandidateRoute({
-                startCoordinate,
-                targetDistanceM,
-                keyword,
-                variant,
-                variantIndex,
-                baseBearingDegrees,
-                requestKey: [
-                  requestKey ??
-                    'route',
-                  attemptIndex,
-                ].join('-'),
-                radiusScale,
-                waypoint,
-                signal,
-              });
-
-            return createCandidate({
-              id: `${variant.id}-attempt-${attemptIndex + 1}`,
-              variantIndex,
-              routeResult,
-              targetDistanceM,
-              accidentZones,
-              safetyDataStatus,
-              evaluatedAt,
-            });
-          },
-        ),
-      );
-
-    throwIfAborted(signal);
-
-    const attemptCandidates:
-      RouteRecommendationCandidate[] =
-      [];
-
-    settledCandidates.forEach(
-      (settledCandidate, index) => {
-        const variant =
-          ROUTE_CANDIDATE_VARIANTS[
-            index
-          ];
-        const candidateId =
-          `${variant.id}-attempt-${attemptIndex + 1}`;
-
-        if (
-          settledCandidate.status ===
-          'rejected'
-        ) {
-          failures.push({
-            candidateId,
-            reason: getFailureReason(
-              settledCandidate.reason,
-            ),
+            baseBearingDegrees,
+            requestKey: [
+              requestKey ?? 'route',
+              attemptIndex,
+            ].join('-'),
+            radiusScale,
+            waypoint,
+            signal,
           });
-          return;
-        }
-
         const candidate =
-          settledCandidate.value;
-        attemptCandidates.push(
+          createCandidate({
+            id: candidateId,
+            variantIndex,
+            routeResult,
+            targetDistanceM,
+            accidentZones,
+            safetyDataStatus,
+            evaluatedAt,
+          });
+
+        generatedCandidates.push(
           candidate,
         );
 
@@ -1036,13 +1025,21 @@ export async function generateRecommendedRoute({
             candidateId,
             reason: 'invalid-distance',
           });
-          return;
+          radiusScale = Math.min(
+            1.1,
+            Math.max(
+              0.25,
+              radiusScale *
+                (targetDistanceM /
+                  candidate.actualDistanceM),
+            ),
+          );
+          continue;
         }
 
         const signature =
           createRouteSignature(
-            candidate.route
-              .coordinates,
+            candidate.route.coordinates,
           );
 
         if (!signature) {
@@ -1050,47 +1047,27 @@ export async function generateRecommendedRoute({
             candidateId,
             reason: 'invalid-route',
           });
-          return;
+          continue;
         }
 
-        if (
-          seenSignatures.has(signature)
-        ) {
+        if (seenSignatures.has(signature)) {
           failures.push({
             candidateId,
-            reason:
-              'duplicate-route',
+            reason: 'duplicate-route',
           });
-          return;
+          break;
         }
 
         seenSignatures.add(signature);
         candidates.push(candidate);
-      },
-    );
-
-    if (candidates.length > 0) {
-      break;
-    }
-
-    const closestAttemptCandidate =
-      attemptCandidates.sort(
-        (first, second) =>
-          first.distanceErrorM -
-          second.distanceErrorM,
-      )[0];
-
-    if (closestAttemptCandidate) {
-      radiusScale = Math.min(
-        1.1,
-        Math.max(
-          0.25,
-          radiusScale *
-            (targetDistanceM /
-              closestAttemptCandidate
-                .actualDistanceM),
-        ),
-      );
+        break;
+      } catch (error: unknown) {
+        throwIfAborted(signal);
+        failures.push({
+          candidateId,
+          reason: getFailureReason(error),
+        });
+      }
     }
   }
 
@@ -1121,6 +1098,30 @@ export async function generateRecommendedRoute({
     };
   }
 
+  const closestGeneratedCandidate =
+    generatedCandidates
+      .slice()
+      .sort(
+        (first, second) =>
+          first.distanceErrorM -
+          second.distanceErrorM,
+      )[0];
+
+  if (closestGeneratedCandidate) {
+    return {
+      status: 'fallback',
+      recommendedCandidate:
+        closestGeneratedCandidate,
+      candidates: generatedCandidates,
+      failures,
+      failedCandidateCount:
+        failures.length,
+      reasonCode: 'fallback-route',
+      reasonText:
+        '목표 거리와 차이가 있어 가장 가까운 코스를 표시한다',
+    };
+  }
+
   if (waypointCandidates.length > 0) {
     return {
       status: 'failed',
@@ -1131,7 +1132,7 @@ export async function generateRecommendedRoute({
         failures.length,
       reasonCode: null,
       reasonText:
-        '선택한 장소를 포함하면서 목표 거리 ±200m를 만족하는 코스를 만들지 못했어요. 다시 생성해 주세요.',
+        '선택한 장소를 포함하는 코스를 만들지 못했어요. 다시 생성해 주세요.',
     };
   }
 
@@ -1160,21 +1161,6 @@ export async function generateRecommendedRoute({
       });
 
     if (
-      !isRouteDistanceWithinTolerance(
-        targetDistanceM,
-        fallbackCandidate
-          .actualDistanceM,
-      )
-    ) {
-      throw new CandidateGenerationError(
-        '기본 코스가 목표 거리 허용 오차를 벗어났습니다.',
-        {
-          reason: 'invalid-distance',
-        },
-      );
-    }
-
-    if (
       typeof __DEV__ !==
         'undefined' &&
       __DEV__
@@ -1198,9 +1184,12 @@ export async function generateRecommendedRoute({
         failures.length,
       reasonCode: 'fallback-route',
       reasonText:
-        REASON_TEXT[
-          'fallback-route'
-        ],
+        isRouteDistanceWithinTolerance(
+          targetDistanceM,
+          fallbackCandidate.actualDistanceM,
+        )
+          ? REASON_TEXT['fallback-route']
+          : '목표 거리와 차이가 있어 가장 가까운 코스를 표시한다',
     };
   } catch (error: unknown) {
     throwIfAborted(signal);
@@ -1230,7 +1219,7 @@ export async function generateRecommendedRoute({
         failures.length,
       reasonCode: null,
       reasonText:
-        '목표 거리 ±200m 안의 코스를 만들지 못했어요. 코스를 다시 생성해 주세요.',
+        '현재 위치에서 코스를 만들지 못했어요. 코스를 다시 생성해 주세요.',
     };
   }
 }

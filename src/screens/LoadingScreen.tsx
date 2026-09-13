@@ -88,24 +88,18 @@ export function LoadingScreen({
       return;
     }
 
-    const timer = setTimeout(() => {
-      navigation.replace(
-        'RunningStart',
-        selectedStartPlace &&
-          selectedTargetDistanceKm
-          ? {
-              startPlace:
-                selectedStartPlace,
-              targetDistanceKm:
-                selectedTargetDistanceKm,
-            }
-          : undefined,
-      );
-    }, 2200);
-
-    return () => {
-      clearTimeout(timer);
-    };
+    navigation.replace(
+      'RunningStart',
+      selectedStartPlace &&
+        selectedTargetDistanceKm
+        ? {
+            startPlace:
+              selectedStartPlace,
+            targetDistanceKm:
+              selectedTargetDistanceKm,
+          }
+        : undefined,
+    );
   }, [
     mode,
     navigation,

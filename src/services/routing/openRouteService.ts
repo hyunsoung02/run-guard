@@ -350,6 +350,7 @@ export function mapOrsInstructionTypeToManeuver(
 
 function createNavigationSteps(
   feature: OrsRouteFeature,
+  coordinateIndexOffset = 0,
 ): NavigationStep[] {
   return (
     feature.properties.segments ?? []
@@ -397,8 +398,12 @@ function createNavigationSteps(
               maneuver,
               distanceM:
                 step.distance,
-              wayPoints:
-                step.way_points,
+              wayPoints: [
+                step.way_points[0] +
+                  coordinateIndexOffset,
+                step.way_points[1] +
+                  coordinateIndexOffset,
+              ],
               coordinate: {
                 longitude:
                   coordinate[0],
@@ -410,6 +415,49 @@ function createNavigationSteps(
         },
       ),
   );
+}
+
+type RouteGeometryWithGpsStart = {
+  coordinates: LngLat[];
+  navigationCoordinateIndexOffset: number;
+};
+
+/**
+ * ORS는 요청 좌표를 가장 가까운 보행 가능 도로 위로 스냅한 geometry를
+ * 반환할 수 있습니다. 요청 자체는 실제 GPS 좌표로 보내더라도, 이 값을
+ * 그대로 표시하면 시작 위치가 GPS 화살표와 떨어져 보이고 첫 위치가
+ * 이탈로 판정될 수 있습니다.
+ *
+ * 따라서 route 모델에는 사용자가 러닝을 시작한 원본 GPS 좌표를 첫
+ * 좌표로 보존하고, ORS 단계가 참조하는 geometry index만 함께 보정합니다.
+ */
+function preserveRequestedGpsStart(
+  requestedCoordinates: readonly LngLat[],
+  routeCoordinates: LngLat[],
+): RouteGeometryWithGpsStart {
+  const requestedStart =
+    requestedCoordinates[0];
+  const routeStart = routeCoordinates[0];
+
+  if (
+    !requestedStart ||
+    !routeStart ||
+    (requestedStart[0] === routeStart[0] &&
+      requestedStart[1] === routeStart[1])
+  ) {
+    return {
+      coordinates: routeCoordinates,
+      navigationCoordinateIndexOffset: 0,
+    };
+  }
+
+  return {
+    coordinates: [
+      [requestedStart[0], requestedStart[1]],
+      ...routeCoordinates,
+    ],
+    navigationCoordinateIndexOffset: 1,
+  };
 }
 
 function createKoreanNavigationInstruction(
@@ -709,6 +757,11 @@ export async function createRunningRoute({
       coordinates,
       feature,
     );
+  const geometryWithGpsStart =
+    preserveRequestedGpsStart(
+      coordinates,
+      feature.geometry.coordinates,
+    );
 
   const route: RunningRoute = {
     id:
@@ -718,9 +771,13 @@ export async function createRunningRoute({
     source: 'ors',
     shape: 'out-and-back',
     coordinates:
-      feature.geometry.coordinates,
+      geometryWithGpsStart.coordinates,
     navigationSteps:
-      createNavigationSteps(feature),
+      createNavigationSteps(
+        feature,
+        geometryWithGpsStart
+          .navigationCoordinateIndexOffset,
+      ),
     turnaroundPoint,
     cautionPoints: [],
     generatedAtMs: Date.now(),

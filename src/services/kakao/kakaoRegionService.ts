@@ -101,16 +101,3 @@ export async function resolveKakaoLegalRegion({
       legalRegion.region_3depth_name,
   };
 }
-
-export function isGwangmyeongRegion(
-  region: KakaoRegion,
-): boolean {
-  return (
-    region.regionType === 'B' &&
-    region.code.startsWith('41210') &&
-    region.region1DepthName ===
-      '경기도' &&
-    region.region2DepthName ===
-      '광명시'
-  );
-}

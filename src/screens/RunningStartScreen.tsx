@@ -65,6 +65,7 @@ import {
 } from '../features/running/utils/runningStartFormatters';
 import type {
   RootStackParamList,
+  SelectedRunningCourseOptions,
 } from '../navigation/types';
 import {
   useRunningStore,
@@ -76,13 +77,11 @@ import type {
   RouteRecommendationResult,
 } from '../services/routing/routeRecommendationService';
 import {
-  fetchOldmanAccidentZones,
   OldmanAccidentApiError,
 } from '../services/safety/oldmanAccidentService';
 import {
-  isGwangmyeongRegion,
-  resolveKakaoLegalRegion,
-} from '../services/kakao/kakaoRegionService';
+  loadNationalSafetyData,
+} from '../services/safety/safetyDataService';
 
 import type {
   OldmanAccidentRiskPoint,
@@ -102,9 +101,10 @@ import {
 } from '../services/kakao/kakaoPlaceService';
 import {
   selectCurrentLocation,
-  selectEnsureFreshLocation,
   selectLocationErrorMessage,
   selectLocationStatus,
+  selectRefreshLocation,
+  selectRefreshRouteStartLocation,
   useLocationStore,
 } from '../stores/useLocationStore';
 
@@ -117,14 +117,8 @@ type RunningStartScreenProps =
 const TARGET_DISTANCE_KM = 5;
 const KEYWORD_PLACE_MAX_DISTANCE_M =
   10_000;
-const ROUTE_START_REFRESH_DISTANCE_M =
-  50;
-
-const GWANGMYEONG_ACCIDENT_REQUEST = {
-  searchYearCd: '2024',
-  siDo: '41',
-  guGun: '210',
-} as const;
+const MIN_ROUTE_START_GPS_FRESHNESS_MS =
+  5_000;
 
 type RouteLoadState = {
   requestKey: string | null;
@@ -196,6 +190,25 @@ function isValidCoordinate(
   );
 }
 
+function getSelectedStartCoordinate(
+  startPlace:
+    | SelectedRunningCourseOptions['startPlace']
+    | undefined,
+): LngLat | null {
+  if (!startPlace) {
+    return null;
+  }
+
+  const coordinate: LngLat = [
+    startPlace.longitude,
+    startPlace.latitude,
+  ];
+
+  return isValidCoordinate(coordinate)
+    ? coordinate
+    : null;
+}
+
 function calculateCoordinateDistanceM(
   first: LngLat,
   second: LngLat,
@@ -213,6 +226,18 @@ export function RunningStartScreen({
 }: RunningStartScreenProps) {
   const selectedCourseOptions =
     navigationRoute.params;
+  const selectedStartCoordinate = useMemo(
+    () =>
+      getSelectedStartCoordinate(
+        selectedCourseOptions?.startPlace,
+      ),
+    [
+      selectedCourseOptions?.startPlace
+        ?.latitude,
+      selectedCourseOptions?.startPlace
+        ?.longitude,
+    ],
+  );
   const targetDistanceKm =
     selectedCourseOptions
       ?.targetDistanceKm ??
@@ -256,38 +281,6 @@ export function RunningStartScreen({
       null,
     );
 
-  const selectedStartLongitude =
-    selectedCourseOptions?.startPlace
-      .longitude;
-  const selectedStartLatitude =
-    selectedCourseOptions?.startPlace
-      .latitude;
-
-  const selectedStartCoordinate =
-    useMemo<LngLat | null>(() => {
-      const selectedStart:
-        | LngLat
-        | undefined =
-        selectedStartLongitude !==
-          undefined &&
-        selectedStartLatitude !==
-          undefined
-          ? [
-              selectedStartLongitude,
-              selectedStartLatitude,
-            ]
-          : undefined;
-
-      return isValidCoordinate(
-        selectedStart,
-      )
-        ? selectedStart
-        : null;
-    }, [
-      selectedStartLatitude,
-      selectedStartLongitude,
-    ]);
-
   const currentLocation =
     useLocationStore(
       selectCurrentLocation,
@@ -300,10 +293,13 @@ export function RunningStartScreen({
     useLocationStore(
       selectLocationErrorMessage,
     );
-  const ensureFreshLocation =
+  const refreshRouteStartLocation =
     useLocationStore(
-      selectEnsureFreshLocation,
+      selectRefreshRouteStartLocation,
     );
+  const refreshLocation = useLocationStore(
+    selectRefreshLocation,
+  );
 
   const [
     route,
@@ -366,6 +362,11 @@ export function RunningStartScreen({
 
   const startNavigationPending =
     useRef(false);
+  const runStartAttemptIdRef = useRef(0);
+  const [
+    isStartingRun,
+    setIsStartingRun,
+  ] = useState(false);
   const locationRequestIdRef =
     useRef(0);
   const recommendationRequestIdRef =
@@ -373,25 +374,8 @@ export function RunningStartScreen({
   const recommendationPendingRef =
     useRef(false);
 
-  useFocusEffect(
-    // 시작 버튼 중복 이동 방지 상태 초기화
-    useCallback(() => {
-      startNavigationPending.current =
-        false;
-    }, []),
-  );
-
   const prepareRouteStartLocation =
     useCallback(async () => {
-      if (selectedStartCoordinate) {
-        locationRequestIdRef.current +=
-          1;
-        setRouteStartCoordinate(
-          selectedStartCoordinate,
-        );
-        return;
-      }
-
       const requestId =
         locationRequestIdRef.current +
         1;
@@ -405,7 +389,7 @@ export function RunningStartScreen({
       setRecommendationResult(null);
 
       const location =
-        await ensureFreshLocation();
+        await refreshRouteStartLocation();
 
       if (
         requestId !==
@@ -434,55 +418,42 @@ export function RunningStartScreen({
         location.latitude,
       ]);
     }, [
-      ensureFreshLocation,
-      selectedStartCoordinate,
+      refreshRouteStartLocation,
     ]);
 
-  useEffect(() => {
-    void prepareRouteStartLocation();
+  useFocusEffect(
+    useCallback(() => {
+      startNavigationPending.current = false;
 
-    return () => {
-      locationRequestIdRef.current += 1;
-    };
-  }, [prepareRouteStartLocation]);
+      if (selectedStartCoordinate) {
+        /* A user-selected place remains the course-preview source of truth. */
+        locationRequestIdRef.current += 1;
+        setRouteStartCoordinate(
+          selectedStartCoordinate,
+        );
+        setRoute(null);
+        setRecommendationResult(null);
+        setRoutePreparationStatus(
+          'generating',
+        );
+        /* Keep the live device marker current without replacing the selected start. */
+        void refreshLocation();
+      } else {
+        void prepareRouteStartLocation();
+      }
 
-  useEffect(() => {
-    if (
-      selectedStartCoordinate ||
-      locationStatus !== 'ready' ||
-      !currentLocation ||
-      !isLocationUsable(
-        currentLocation,
-      )
-    ) {
-      return;
-    }
-
-    const nextCoordinate: LngLat = [
-      currentLocation.longitude,
-      currentLocation.latitude,
-    ];
-
-    setRouteStartCoordinate(
-      (previousCoordinate) => {
-        if (!previousCoordinate) {
-          return nextCoordinate;
-        }
-
-        return calculateCoordinateDistanceM(
-          previousCoordinate,
-          nextCoordinate,
-        ) >=
-          ROUTE_START_REFRESH_DISTANCE_M
-          ? nextCoordinate
-          : previousCoordinate;
-      },
-    );
-  }, [
-    currentLocation,
-    locationStatus,
-    selectedStartCoordinate,
-  ]);
+      return () => {
+        locationRequestIdRef.current += 1;
+        runStartAttemptIdRef.current += 1;
+        startNavigationPending.current = false;
+        setIsStartingRun(false);
+      };
+    }, [
+      prepareRouteStartLocation,
+      refreshLocation,
+      selectedStartCoordinate,
+    ]),
+  );
 
   useEffect(() => {
     const abortController =
@@ -649,37 +620,12 @@ export function RunningStartScreen({
 
     async function loadAccidentZones() {
       try {
-        const region =
-          await resolveKakaoLegalRegion({
+        const result =
+          await loadNationalSafetyData({
             longitude:
               accidentRequestCoordinate[0],
             latitude:
               accidentRequestCoordinate[1],
-            signal:
-              abortController.signal,
-          });
-
-        if (
-          !screenIsMounted ||
-          abortController.signal.aborted
-        ) {
-          return;
-        }
-
-        if (
-          !isGwangmyeongRegion(region)
-        ) {
-          setAccidentZones([]);
-          setAccidentStatus(
-            'unavailable',
-          );
-          return;
-        }
-
-        const result =
-          await fetchOldmanAccidentZones({
-            ...GWANGMYEONG_ACCIDENT_REQUEST,
-            timeoutMs: 4_000,
             signal:
               abortController.signal,
           });
@@ -1050,7 +996,11 @@ export function RunningStartScreen({
               !routeStartCoordinate
             ? locationErrorMessage ??
               '현재 위치를 확인할 수 없어요. GPS 상태를 확인한 뒤 다시 시도해 주세요.'
-            : isDetailKeyword(
+            : recommendationResult
+                  ?.status ===
+                'fallback'
+              ? recommendationResult.reasonText
+              : isDetailKeyword(
                   selectedKeyword,
                 ) &&
                 (keywordSearchStatus ===
@@ -1192,77 +1142,189 @@ export function RunningStartScreen({
     Alert.alert(title, message);
   }
 
-  function handleStartRunning() {
+  async function handleStartRunning() {
+    if (startNavigationPending.current) {
+      return;
+    }
+
+    const existingStatus =
+      useRunningStore.getState()
+        .activeSession?.status;
+
     if (
-      startNavigationPending.current ||
-      !routeIsReady ||
-      !route ||
-      !recommendationResult
-        ?.recommendedCandidate
+      existingStatus === 'running' ||
+      existingStatus === 'paused'
     ) {
       Alert.alert(
+        '이미 진행 중인 러닝이 있어요',
+        '현재 러닝을 종료하거나 이어서 진행해 주세요.',
+      );
+      return;
+    }
+
+    startNavigationPending.current = true;
+    setIsStartingRun(true);
+    /* Ignore any focus-time location prefetch that finishes after this tap. */
+    locationRequestIdRef.current += 1;
+    const capturedAfterMs = Date.now();
+    const attemptId =
+      runStartAttemptIdRef.current + 1;
+    runStartAttemptIdRef.current = attemptId;
+
+    const freshLocation =
+      await refreshRouteStartLocation();
+
+    const locationIsFresh =
+      freshLocation !== null &&
+      freshLocation.timestampMs >=
+        capturedAfterMs -
+          MIN_ROUTE_START_GPS_FRESHNESS_MS;
+
+    if (
+      attemptId !== runStartAttemptIdRef.current
+    ) {
+      return;
+    }
+
+    if (
+      !freshLocation ||
+      !locationIsFresh ||
+      !isLocationUsable(freshLocation)
+    ) {
+      startNavigationPending.current = false;
+      setIsStartingRun(false);
+      Alert.alert(
+        '현재 위치를 확인할 수 없어요',
+        'GPS 정확도가 좋아진 뒤 다시 시도해 주세요.',
+      );
+      return;
+    }
+
+    if (
+      !routeIsReady ||
+      !route ||
+      !recommendationResult?.recommendedCandidate ||
+      !routeStartCoordinate
+    ) {
+      startNavigationPending.current = false;
+      setIsStartingRun(false);
+      Alert.alert(
         '코스를 시작할 수 없어요',
-        '실제 경로와 길 안내를 준비한 뒤 다시 시도해 주세요.',
+        '코스 생성이 완료된 뒤 다시 시도해 주세요.',
+      );
+      return;
+    }
+
+    const currentCoordinate: LngLat = [
+      freshLocation.longitude,
+      freshLocation.latitude,
+    ];
+    const distanceFromRouteStartM =
+      calculateCoordinateDistanceM(
+        currentCoordinate,
+        routeStartCoordinate,
+      );
+
+    if (
+      distanceFromRouteStartM > 100
+    ) {
+      startNavigationPending.current = false;
+      setIsStartingRun(false);
+
+      if (selectedStartCoordinate) {
+        Alert.alert(
+          '출발지와 거리가 있어요',
+          '설정한 출발지 근처에서 시작해 주세요',
+        );
+      } else {
+        Alert.alert(
+          '코스 출발점과 거리가 있어요',
+          '현재 위치가 바뀌었어요. 현재 위치를 기준으로 코스를 다시 생성해 주세요.',
+          [
+            {
+              text: '취소',
+              style: 'cancel',
+            },
+            {
+              text: '코스 재생성',
+              onPress: () => {
+                setRouteStartCoordinate(
+                  currentCoordinate,
+                );
+                setRoute(null);
+                setRecommendationResult(null);
+                setRouteRefreshToken(
+                  (currentToken) =>
+                    currentToken + 1,
+                );
+                setRoutePreparationStatus(
+                  'generating',
+                );
+              },
+            },
+          ],
+        );
+      }
+      return;
+    }
+
+    const runningStore =
+      useRunningStore.getState();
+    const activeStatus =
+      runningStore.activeSession?.status;
+
+    if (
+      activeStatus === 'running' ||
+      activeStatus === 'paused'
+    ) {
+      startNavigationPending.current = false;
+      setIsStartingRun(false);
+      Alert.alert(
+        '이미 진행 중인 러닝이 있어요',
+        '현재 러닝을 종료하거나 이어서 진행해 주세요.',
       );
       return;
     }
 
     const targetDistanceM =
-      targetDistanceKm * 1000;
-    const runningStore =
+      targetDistanceKm * 1_000;
+    runningStore.prepareSession(
+      targetDistanceM,
+      route.coordinates,
+    );
+
+    const preparedStore =
       useRunningStore.getState();
-    const session =
-      runningStore.activeSession;
+    const preparedSession =
+      preparedStore.activeSession;
 
     if (
-      session?.status !== 'running' &&
-      session?.status !== 'paused'
+      preparedSession?.status !== 'ready' &&
+      preparedSession?.status !== 'idle'
     ) {
-      runningStore.prepareSession(
-        targetDistanceM,
-        route.coordinates,
-      );
-
-      const preparedStore =
-        useRunningStore.getState();
-      const preparedSession =
-        preparedStore.activeSession;
-
-      if (
-        preparedSession?.status ===
-          'ready' ||
-        preparedSession?.status ===
-          'idle'
-      ) {
-        preparedStore.startSession();
-      }
-    }
-
-    const activeStatus =
-      useRunningStore.getState()
-        .activeSession?.status;
-
-    if (
-      activeStatus !== 'running' &&
-      activeStatus !== 'paused'
-    ) {
+      startNavigationPending.current = false;
+      setIsStartingRun(false);
       return;
     }
 
-    startNavigationPending.current =
-      true;
+    preparedStore.startSession(
+      freshLocation.timestampMs,
+    );
+    preparedStore.appendLocationPoint(
+      freshLocation,
+      0,
+    );
+
+    setIsStartingRun(false);
 
     navigation.navigate(
       'RunningActive',
       {
         routeId: route.id,
-        routeCoordinates:
-          route.coordinates,
-        navigationSteps:
-          route.navigationSteps,
+        routeCoordinates: route.coordinates,
+        navigationSteps: route.navigationSteps,
         warningPoints:
-          safetyEvaluation
-            .warningPoints,
+          safetyEvaluation.warningPoints,
         targetDistanceM,
         plannedDistanceM:
           recommendationResult
@@ -1273,13 +1335,10 @@ export function RunningStartScreen({
           'available'
             ? 'available'
             : 'unavailable',
-        safetyScore:
-          safetyEvaluation.score,
+        safetyScore: safetyEvaluation.score,
         startCoordinate:
-          routeStartCoordinate ??
-          route.coordinates[0],
-        generatedAtMs:
-          route.generatedAtMs,
+          currentCoordinate,
+        generatedAtMs: route.generatedAtMs,
       },
     );
   }
@@ -1301,12 +1360,21 @@ export function RunningStartScreen({
 
       <View style={styles.mapLayer}>
         <LiveRunningMap
+          autoFocusInitialLocation={
+            !selectedStartCoordinate &&
+            route === null
+          }
           centerCoordinate={
             routeStartCoordinate ??
             undefined
           }
           locationStatus={
             locationStatus
+          }
+          navigationLocation={
+            locationStatus === 'ready'
+              ? currentLocation
+              : null
           }
           locationIsLoading={
             routePreparationStatus ===
@@ -1390,11 +1458,18 @@ export function RunningStartScreen({
         actualDistanceKm={
           actualDistanceKm
         }
+        isStartingRun={isStartingRun}
         recommendationIsLoading={
           recommendationIsLoading
         }
         recommendationReason={
           recommendationReason
+        }
+        isDistanceFallback={
+          recommendationResult?.status ===
+            'fallback' &&
+          recommendationResult.reasonText ===
+            '목표 거리와 차이가 있어 가장 가까운 코스를 표시한다'
         }
         routeIsReady={routeIsReady}
         targetDistanceKm={

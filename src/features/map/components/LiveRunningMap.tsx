@@ -8,7 +8,7 @@ import {
 import {
   Camera,
   Map,
-  UserLocation,
+  Marker,
 } from '@maplibre/maplibre-react-native';
 
 import type {
@@ -20,6 +20,7 @@ import type {
 
 import {
   ActivityIndicator,
+  Image,
   StyleSheet,
   Text,
   View,
@@ -40,6 +41,12 @@ import type {
 import type {
   LocationStatus,
 } from '../../../stores/useLocationStore';
+import type {
+  LocationPoint,
+} from '../../../types';
+import type {
+  NavigationManeuver,
+} from '../../running/types/voiceGuide.types';
 
 import {
   RunningRouteLayer,
@@ -65,6 +72,23 @@ type LiveRunningMapProps = {
   onSelectKeywordPlace: (
     place: KeywordPlace,
   ) => void;
+  /** RunningActive에서 현재 위치 버튼으로 카메라를 복귀시키는 신호. */
+  navigationLocation?: LocationPoint | null;
+  focusRequestKey?: number;
+  /** 경로나 지정 출발지가 없는 최초 진입에서만 현재 위치를 표시합니다. */
+  autoFocusInitialLocation?: boolean;
+  /** 다음 실제 회전 지점의 안내 배지입니다. */
+  nextTurnMarker?: NextTurnMarker | null;
+  /** 사용자가 지도를 옮기기 전까지 현재 위치를 따라갑니다. */
+  followNavigationLocation?: boolean;
+  onUserMapInteraction?: () => void;
+};
+
+export type NextTurnMarker = {
+  coordinate: LngLat;
+  label: string;
+  color: string;
+  direction: NavigationManeuver;
 };
 
 const MAP_STYLE_URL =
@@ -78,6 +102,34 @@ const ROUTE_CAMERA_PADDING: ViewPadding = {
 };
 
 const ROUTE_CAMERA_DURATION_MS = 650;
+const NAVIGATION_MARKER_ID =
+  'running-navigation-location';
+const NEXT_TURN_MARKER_ID =
+  'running-next-turn';
+const MINIMUM_DIRECTIONAL_SPEED_MPS =
+  0.8;
+const MINIMUM_BEARING_DISTANCE_M = 5;
+const MAXIMUM_BEARING_DISTANCE_M = 25;
+const BEARING_CHANGE_DEADBAND_DEG = 10;
+const DIRECTION_ARROW_IMAGE = require(
+  '../../../assets/icons/running/running-direction-arrow.png',
+);
+
+const TURN_ROTATION: Record<
+  NavigationManeuver,
+  number
+> = {
+  straight: 0,
+  'slight-left': -45,
+  left: -90,
+  'sharp-left': -135,
+  'slight-right': 45,
+  right: 90,
+  'sharp-right': 135,
+  'u-turn': 180,
+  arrive: 0,
+  unknown: 0,
+};
 
 type RouteCameraTarget = {
   bounds: LngLatBounds;
@@ -96,6 +148,397 @@ function getInitialZoom(
   }
 
   return 13.3;
+}
+
+function isValidCoordinate(
+  coordinate: unknown,
+): coordinate is LngLat {
+  if (
+    !Array.isArray(coordinate) ||
+    coordinate.length < 2
+  ) {
+    return false;
+  }
+
+  const [longitude, latitude] = coordinate;
+
+  return (
+    typeof longitude === 'number' &&
+    Number.isFinite(longitude) &&
+    longitude >= -180 &&
+    longitude <= 180 &&
+    typeof latitude === 'number' &&
+    Number.isFinite(latitude) &&
+    latitude >= -90 &&
+    latitude <= 90
+  );
+}
+
+function getNavigationCoordinate(
+  location: LocationPoint,
+): LngLat | null {
+  const coordinate: LngLat = [
+    location.longitude,
+    location.latitude,
+  ];
+
+  return isValidCoordinate(coordinate)
+    ? coordinate
+    : null;
+}
+
+function normalizeBearing(
+  bearingDeg: number,
+): number | null {
+  if (!Number.isFinite(bearingDeg)) {
+    return null;
+  }
+
+  return (
+    ((bearingDeg % 360) + 360) % 360
+  );
+}
+
+function getReliableHeading(
+  location: LocationPoint,
+): number | null {
+  const heading = location.headingDeg;
+  const speed = location.speedMps;
+
+  if (
+    heading === null ||
+    speed === null ||
+    !Number.isFinite(heading) ||
+    heading < 0 ||
+    heading > 360 ||
+    !Number.isFinite(speed) ||
+    speed < MINIMUM_DIRECTIONAL_SPEED_MPS
+  ) {
+    return null;
+  }
+
+  return normalizeBearing(heading);
+}
+
+function getDistanceBetweenLocationsM(
+  first: LocationPoint,
+  second: LocationPoint,
+): number {
+  const earthRadiusM = 6_371_000;
+  const latitudeDeltaRad =
+    ((second.latitude - first.latitude) *
+      Math.PI) /
+    180;
+  const longitudeDeltaRad =
+    ((second.longitude - first.longitude) *
+      Math.PI) /
+    180;
+  const firstLatitudeRad =
+    (first.latitude * Math.PI) / 180;
+  const secondLatitudeRad =
+    (second.latitude * Math.PI) / 180;
+  const haversine =
+    Math.sin(latitudeDeltaRad / 2) ** 2 +
+    Math.cos(firstLatitudeRad) *
+      Math.cos(secondLatitudeRad) *
+      Math.sin(longitudeDeltaRad / 2) ** 2;
+
+  return (
+    2 *
+    earthRadiusM *
+    Math.atan2(
+      Math.sqrt(haversine),
+      Math.sqrt(1 - haversine),
+    )
+  );
+}
+
+function getBearingBetweenLocations(
+  first: LocationPoint,
+  second: LocationPoint,
+): number | null {
+  const longitudeDeltaRad =
+    ((second.longitude - first.longitude) *
+      Math.PI) /
+    180;
+  const firstLatitudeRad =
+    (first.latitude * Math.PI) / 180;
+  const secondLatitudeRad =
+    (second.latitude * Math.PI) / 180;
+  const horizontal =
+    Math.sin(longitudeDeltaRad) *
+    Math.cos(secondLatitudeRad);
+  const vertical =
+    Math.cos(firstLatitudeRad) *
+      Math.sin(secondLatitudeRad) -
+    Math.sin(firstLatitudeRad) *
+      Math.cos(secondLatitudeRad) *
+      Math.cos(longitudeDeltaRad);
+
+  return normalizeBearing(
+    (Math.atan2(horizontal, vertical) *
+      180) /
+      Math.PI,
+  );
+}
+
+function getMovementBearing(
+  previous: LocationPoint,
+  current: LocationPoint,
+): number | null {
+  if (
+    current.timestampMs <=
+    previous.timestampMs
+  ) {
+    return null;
+  }
+
+  const accuracyM = Math.max(
+    previous.accuracyM ?? 0,
+    current.accuracyM ?? 0,
+  );
+  const minimumDistanceM = Math.max(
+    MINIMUM_BEARING_DISTANCE_M,
+    Math.min(
+      accuracyM,
+      MAXIMUM_BEARING_DISTANCE_M,
+    ),
+  );
+  const distanceM =
+    getDistanceBetweenLocationsM(
+      previous,
+      current,
+    );
+
+  if (distanceM < minimumDistanceM) {
+    return null;
+  }
+
+  return getBearingBetweenLocations(
+    previous,
+    current,
+  );
+}
+
+function getAngularDifferenceDeg(
+  first: number,
+  second: number,
+): number {
+  return Math.abs(
+    ((first - second + 540) % 360) - 180,
+  );
+}
+
+type NavigationLocationMarkerProps = {
+  location: LocationPoint;
+};
+
+function NavigationLocationMarker({
+  location,
+}: NavigationLocationMarkerProps) {
+  const lastObservedLocationRef =
+    useRef<LocationPoint | null>(null);
+  const bearingOriginLocationRef =
+    useRef<LocationPoint | null>(null);
+  const stableBearingRef = useRef<
+    number | null
+  >(null);
+  const [
+    bearingDeg,
+    setBearingDeg,
+  ] = useState(0);
+  const coordinate = getNavigationCoordinate(
+    location,
+  );
+
+  useEffect(() => {
+    const lastObservedLocation =
+      lastObservedLocationRef.current;
+
+    if (
+      lastObservedLocation &&
+      location.timestampMs <=
+        lastObservedLocation.timestampMs
+    ) {
+      return;
+    }
+
+    const reliableHeading =
+      getReliableHeading(location);
+    const movementBearing =
+      reliableHeading === null &&
+      bearingOriginLocationRef.current
+        ? getMovementBearing(
+            bearingOriginLocationRef.current,
+            location,
+          )
+        : null;
+    const candidateBearing =
+      reliableHeading ?? movementBearing;
+
+    if (candidateBearing !== null) {
+      const stableBearing =
+        stableBearingRef.current;
+      const shouldUpdateBearing =
+        stableBearing === null ||
+        getAngularDifferenceDeg(
+          stableBearing,
+          candidateBearing,
+        ) >= BEARING_CHANGE_DEADBAND_DEG;
+
+      if (shouldUpdateBearing) {
+        stableBearingRef.current =
+          candidateBearing;
+        setBearingDeg(candidateBearing);
+      }
+
+      bearingOriginLocationRef.current =
+        location;
+    } else if (
+      bearingOriginLocationRef.current === null
+    ) {
+      bearingOriginLocationRef.current =
+        location;
+    }
+
+    lastObservedLocationRef.current = location;
+  }, [location]);
+
+  if (!coordinate) {
+    return null;
+  }
+
+  return (
+    <Marker
+      anchor="center"
+      id={NAVIGATION_MARKER_ID}
+      lngLat={coordinate}
+    >
+      <View
+        accessibilityLabel="현재 위치와 진행 방향"
+        accessible
+        pointerEvents="none"
+        style={styles.navigationMarker}
+      >
+        <View style={styles.navigationHalo} />
+
+        <View
+          style={styles.navigationMarkerSurface}
+        >
+          <View
+            style={[
+              styles.navigationArrow,
+              {
+                transform: [
+                  {
+                    rotate: `${bearingDeg}deg`,
+                  },
+                ],
+              },
+            ]}
+          >
+            <View
+              style={styles.navigationArrowHead}
+            />
+
+            <View
+              style={styles.navigationArrowTail}
+            />
+          </View>
+        </View>
+      </View>
+    </Marker>
+  );
+}
+
+type NextTurnMapMarkerProps = {
+  marker: NextTurnMarker;
+};
+
+function NextTurnMapMarker({
+  marker,
+}: NextTurnMapMarkerProps) {
+  const label = marker.label.trim();
+  const color = marker.color.trim();
+
+  if (
+    !isValidCoordinate(marker.coordinate) ||
+    label.length === 0 ||
+    color.length === 0
+  ) {
+    return null;
+  }
+
+  return (
+    <Marker
+      anchor="bottom"
+      id={NEXT_TURN_MARKER_ID}
+      lngLat={marker.coordinate}
+      offset={[0, 10]}
+    >
+      <View
+        accessibilityLabel={`다음 회전: ${label}`}
+        accessible
+        pointerEvents="none"
+        style={styles.nextTurnMarker}
+      >
+        <View
+          style={[
+            styles.nextTurnLabel,
+            { backgroundColor: color },
+          ]}
+        >
+          <Text
+            numberOfLines={1}
+            style={styles.nextTurnLabelText}
+          >
+            {label}
+          </Text>
+
+          <Image
+            fadeDuration={0}
+            resizeMode="contain"
+            source={DIRECTION_ARROW_IMAGE}
+            style={[
+              styles.nextTurnArrow,
+              {
+                transform: [
+                  {
+                    rotate: `${
+                      TURN_ROTATION[
+                        marker.direction
+                      ]
+                    }deg`,
+                  },
+                ],
+              },
+            ]}
+          />
+        </View>
+
+        <View
+          style={[
+            styles.nextTurnStem,
+            { backgroundColor: color },
+          ]}
+        />
+
+        <View
+          style={[
+            styles.nextTurnDot,
+            { borderColor: color },
+          ]}
+        >
+          <View
+            style={[
+              styles.nextTurnDotInner,
+              { backgroundColor: color },
+            ]}
+          />
+        </View>
+      </View>
+    </Marker>
+  );
 }
 
 /**
@@ -267,6 +710,12 @@ export function LiveRunningMap({
   warningPoints = [],
   keywordPlaces = [],
   onSelectKeywordPlace,
+  navigationLocation = null,
+  focusRequestKey = 0,
+  autoFocusInitialLocation = false,
+  nextTurnMarker = null,
+  followNavigationLocation = false,
+  onUserMapInteraction,
 }: LiveRunningMapProps) {
   const cameraRef =
     useRef<CameraRef>(null);
@@ -276,6 +725,10 @@ export function LiveRunningMap({
 
   const lastFittedRouteKeyRef =
     useRef<string | null>(null);
+  const lastFocusedLocationRef =
+    useRef<string | null>(null);
+  const lastFocusRequestKeyRef =
+    useRef<number | null>(null);
 
   const [
     mapLoadFailed,
@@ -432,6 +885,70 @@ export function LiveRunningMap({
     routeCameraTarget,
   ]);
 
+  useEffect(() => {
+    if (!mapIsReady || !navigationLocation) {
+      return;
+    }
+
+    const focusKey = [
+      navigationLocation.timestampMs,
+      focusRequestKey,
+    ].join(':');
+    const locationHasChanged =
+      !lastFocusedLocationRef.current?.startsWith(
+        `${navigationLocation.timestampMs}:`,
+      );
+    const explicitFocusRequested =
+      focusRequestKey > 0 &&
+      lastFocusRequestKeyRef.current !==
+        focusRequestKey;
+    const shouldFocus =
+      (autoFocusInitialLocation &&
+        lastFocusedLocationRef.current ===
+          null) ||
+      explicitFocusRequested ||
+      (followNavigationLocation &&
+        locationHasChanged);
+
+    if (!shouldFocus) {
+      return;
+    }
+
+    if (lastFocusedLocationRef.current === focusKey) {
+      return;
+    }
+
+    const camera = cameraRef.current;
+
+    if (!camera) {
+      return;
+    }
+
+    camera.easeTo({
+      center: [
+        navigationLocation.longitude,
+        navigationLocation.latitude,
+      ],
+      duration: 500,
+      padding: {
+        top: 120,
+        right: 0,
+        bottom: 300,
+        left: 0,
+      },
+      zoom: 16.5,
+    });
+    lastFocusedLocationRef.current = focusKey;
+    lastFocusRequestKeyRef.current =
+      focusRequestKey;
+  }, [
+    autoFocusInitialLocation,
+    focusRequestKey,
+    followNavigationLocation,
+    mapIsReady,
+    navigationLocation,
+  ]);
+
   return (
     <View style={styles.container}>
       {initialViewState &&
@@ -447,6 +964,11 @@ export function LiveRunningMap({
         dragPan={true}
         logo={false}
         mapStyle={MAP_STYLE_URL}
+        onRegionWillChange={(event) => {
+          if (event.nativeEvent.userInteraction) {
+            onUserMapInteraction?.();
+          }
+        }}
         onDidFailLoadingMap={() => {
           lastFittedRouteKeyRef.current =
             null;
@@ -517,13 +1039,16 @@ export function LiveRunningMap({
           }
         />
 
-        {locationStatus ===
-          'ready' && (
-          <UserLocation
-            accuracy
-            animated
-            heading
-            minDisplacement={2}
+        {nextTurnMarker && (
+          <NextTurnMapMarker
+            marker={nextTurnMarker}
+          />
+        )}
+
+        {locationStatus === 'ready' &&
+          navigationLocation && (
+          <NavigationLocationMarker
+            location={navigationLocation}
           />
         )}
         </Map>
@@ -577,6 +1102,133 @@ const styles =
 
     map: {
       ...StyleSheet.absoluteFill,
+    },
+
+    navigationMarker: {
+      width: 54,
+      height: 54,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+
+    navigationHalo: {
+      position: 'absolute',
+      width: 54,
+      height: 54,
+      borderRadius: 27,
+      backgroundColor:
+        'rgba(126,172,0,0.18)',
+    },
+
+    navigationMarkerSurface: {
+      width: 40,
+      height: 40,
+      borderRadius: 20,
+      alignItems: 'center',
+      justifyContent: 'center',
+      backgroundColor: '#FFFFFF',
+      borderColor: 'rgba(17,17,17,0.08)',
+      borderWidth: 1,
+      elevation: 3,
+      shadowColor: '#111111',
+      shadowOffset: {
+        width: 0,
+        height: 2,
+      },
+      shadowOpacity: 0.18,
+      shadowRadius: 5,
+    },
+
+    navigationArrow: {
+      width: 24,
+      height: 27,
+      alignItems: 'center',
+    },
+
+    navigationArrowHead: {
+      width: 0,
+      height: 0,
+      borderRightWidth: 10,
+      borderBottomWidth: 17,
+      borderLeftWidth: 10,
+      borderRightColor: 'transparent',
+      borderBottomColor: '#7EAC00',
+      borderLeftColor: 'transparent',
+    },
+
+    navigationArrowTail: {
+      width: 8,
+      height: 10,
+      marginTop: -2,
+      borderBottomRightRadius: 2,
+      borderBottomLeftRadius: 2,
+      backgroundColor: '#7EAC00',
+    },
+
+    nextTurnMarker: {
+      alignItems: 'center',
+      justifyContent: 'flex-end',
+    },
+
+    nextTurnLabel: {
+      maxWidth: 132,
+      minHeight: 30,
+      paddingHorizontal: 11,
+      borderRadius: 15,
+      alignItems: 'center',
+      justifyContent: 'center',
+      flexDirection: 'row',
+      shadowColor: '#111111',
+      shadowOffset: {
+        width: 0,
+        height: 2,
+      },
+      shadowOpacity: 0.17,
+      shadowRadius: 4,
+      elevation: 2,
+    },
+
+    nextTurnLabelText: {
+      color: '#FFFFFF',
+      fontSize: 13,
+      fontWeight: '800',
+    },
+
+    nextTurnArrow: {
+      width: 16,
+      height: 16,
+      marginLeft: 4,
+      tintColor: '#FFFFFF',
+    },
+
+    nextTurnStem: {
+      width: 3,
+      height: 10,
+      marginTop: -1,
+    },
+
+    nextTurnDot: {
+      width: 19,
+      height: 19,
+      borderRadius: 9.5,
+      alignItems: 'center',
+      justifyContent: 'center',
+      borderWidth: 3,
+      backgroundColor: '#FFFFFF',
+      shadowColor: '#111111',
+      shadowOffset: {
+        width: 0,
+        height: 1,
+      },
+      shadowOpacity: 0.16,
+      shadowRadius: 3,
+      elevation: 2,
+    },
+
+    nextTurnDotInner: {
+      width: 7,
+      height: 7,
+      borderRadius: 3.5,
     },
 
     loadingBadge: {

@@ -27,6 +27,8 @@ export interface LocationStoreState {
     Promise<LocationPoint | null>;
   refreshLocation: () =>
     Promise<LocationPoint | null>;
+  refreshRouteStartLocation: () =>
+    Promise<LocationPoint | null>;
   ensureFreshLocation: () =>
     Promise<LocationPoint | null>;
   clearLocationError: () => void;
@@ -40,6 +42,52 @@ type LocationRequestOptions = {
 let locationRequestPromise:
   | Promise<LocationPoint | null>
   | null = null;
+
+const CURRENT_LOCATION_TIMEOUT_MS =
+  12_000;
+
+class CurrentLocationTimeoutError extends Error {
+  constructor() {
+    super('현재 위치 확인 시간이 초과되었습니다.');
+  }
+}
+
+async function getCurrentPositionWithTimeout(): Promise<Location.LocationObject> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const timeoutId = setTimeout(() => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      reject(new CurrentLocationTimeoutError());
+    }, CURRENT_LOCATION_TIMEOUT_MS);
+
+    void Location.getCurrentPositionAsync({
+      accuracy: Location.Accuracy.High,
+    }).then(
+      (position) => {
+        if (settled) {
+          return;
+        }
+
+        settled = true;
+        clearTimeout(timeoutId);
+        resolve(position);
+      },
+      (error: unknown) => {
+        if (settled) {
+          return;
+        }
+
+        settled = true;
+        clearTimeout(timeoutId);
+        reject(error);
+      },
+    );
+  });
+}
 
 function toLocationPoint(
   location: Location.LocationObject,
@@ -62,6 +110,10 @@ function toLocationPoint(
 function getErrorMessage(
   error: unknown,
 ): string {
+  if (error instanceof CurrentLocationTimeoutError) {
+    return '현재 위치 확인 시간이 초과되었어요. GPS 상태를 확인하고 다시 시도해 주세요.';
+  }
+
   if (
     error instanceof Error &&
     error.message.trim().length > 0
@@ -138,6 +190,18 @@ export const useLocationStore =
                 errorMessage: null,
               });
 
+              const servicesEnabled =
+                await Location.hasServicesEnabledAsync();
+
+              if (!servicesEnabled) {
+                set({
+                  status: 'error',
+                  errorMessage:
+                    '위치 서비스가 꺼져 있어요. GPS를 켠 뒤 다시 시도해 주세요.',
+                });
+                return null;
+              }
+
               if (
                 preferLastKnownPosition
               ) {
@@ -177,11 +241,7 @@ export const useLocationStore =
               }
 
               const currentPosition =
-                await Location
-                  .getCurrentPositionAsync({
-                    accuracy:
-                      Location.Accuracy.High,
-                  });
+                await getCurrentPositionWithTimeout();
               const currentPoint =
                 toLocationPoint(
                   currentPosition,
@@ -267,6 +327,94 @@ export const useLocationStore =
               false,
           }),
 
+        /*
+         * 매 러닝 시작 전에 캐시·이전 세션 위치뿐 아니라 진행 중인
+         * last-known 위치 요청도 재사용하지 않고 새 GPS 값을 수집한다.
+         */
+        refreshRouteStartLocation: async () => {
+          try {
+            let permission =
+              await Location.getForegroundPermissionsAsync();
+
+            if (
+              permission.status !==
+                Location.PermissionStatus.GRANTED &&
+              permission.canAskAgain
+            ) {
+              set({
+                status: 'loading',
+                errorMessage: null,
+              });
+              permission =
+                await Location.requestForegroundPermissionsAsync();
+            }
+
+            if (
+              permission.status !==
+              Location.PermissionStatus.GRANTED
+            ) {
+              set({
+                status: 'permission-denied',
+                errorMessage:
+                  '위치 권한이 없어 현재 위치 기반 코스를 만들 수 없어요.',
+              });
+              return null;
+            }
+
+            set({
+              status: 'loading',
+              errorMessage: null,
+            });
+
+            const servicesEnabled =
+              await Location.hasServicesEnabledAsync();
+
+            if (!servicesEnabled) {
+              set({
+                status: 'error',
+                errorMessage:
+                  '위치 서비스가 꺼져 있어요. GPS를 켠 뒤 다시 시도해 주세요.',
+              });
+              return null;
+            }
+
+            const currentPosition =
+              await getCurrentPositionWithTimeout();
+            const currentPoint = toLocationPoint(
+              currentPosition,
+            );
+
+            if (!isLocationUsable(currentPoint)) {
+              set({
+                currentLocation: currentPoint,
+                capturedAtMs: currentPoint.timestampMs,
+                accuracyM: currentPoint.accuracyM,
+                status: 'error',
+                errorMessage:
+                  currentPoint.accuracyM === null
+                    ? '위치 정확도를 확인할 수 없어요. 잠시 후 다시 시도해 주세요.'
+                    : '현재 위치의 정확도가 낮아요. 탁 트인 곳에서 다시 시도해 주세요.',
+              });
+              return null;
+            }
+
+            set({
+              currentLocation: currentPoint,
+              capturedAtMs: currentPoint.timestampMs,
+              accuracyM: currentPoint.accuracyM,
+              status: 'ready',
+              errorMessage: null,
+            });
+            return currentPoint;
+          } catch (error: unknown) {
+            set({
+              status: 'error',
+              errorMessage: getErrorMessage(error),
+            });
+            return null;
+          }
+        },
+
         ensureFreshLocation:
           async () => {
             const current =
@@ -342,6 +490,10 @@ export const selectInitializeLocation = (
 export const selectRefreshLocation = (
   state: LocationStoreState,
 ) => state.refreshLocation;
+
+export const selectRefreshRouteStartLocation = (
+  state: LocationStoreState,
+) => state.refreshRouteStartLocation;
 
 export const selectEnsureFreshLocation =
   (state: LocationStoreState) =>

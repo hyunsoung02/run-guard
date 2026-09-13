@@ -19,8 +19,10 @@ import {
 
 type RunningStartSummaryProps = {
   actualDistanceKm: number | null;
+  isStartingRun?: boolean;
   recommendationIsLoading: boolean;
   recommendationReason: string;
+  isDistanceFallback?: boolean;
   routeIsReady: boolean;
   targetDistanceKm: number;
   targetPace: string;
@@ -29,8 +31,10 @@ type RunningStartSummaryProps = {
 
 export function RunningStartSummary({
   actualDistanceKm,
+  isStartingRun = false,
   recommendationIsLoading,
   recommendationReason,
+  isDistanceFallback = false,
   routeIsReady,
   targetDistanceKm,
   targetPace,
@@ -40,6 +44,7 @@ export function RunningStartSummary({
     useWindowDimensions();
   const insets = useSafeAreaInsets();
   const startIsDisabled =
+    isStartingRun ||
     recommendationIsLoading ||
     !routeIsReady;
 
@@ -116,7 +121,10 @@ export function RunningStartSummary({
       </View>
 
       <Text style={styles.recommendationTitle}>
-        규칙 기반 추천 코스 · 목표{' '}
+        {isDistanceFallback
+          ? '가장 가까운 대체 코스'
+          : '규칙 기반 추천 코스'}{' '}
+        · 목표{' '}
         {targetDistanceKm}km
       </Text>
 
@@ -125,7 +133,9 @@ export function RunningStartSummary({
         numberOfLines={2}
         style={styles.recommendationReason}
       >
-        {recommendationReason}
+        {isStartingRun
+          ? '코스 출발점 근처인지 최신 GPS로 확인하고 있어요.'
+          : recommendationReason}
       </Text>
     </View>
   );
